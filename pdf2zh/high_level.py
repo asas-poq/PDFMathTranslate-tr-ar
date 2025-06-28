@@ -363,7 +363,8 @@ def translate(
         envs = {}
 
     if "noto_fonts" not in envs:
-        from myfonts import load_noto_fonts  # <-- замените на путь к своей функции
+        from babeldoc.utils.fonts import load_noto_fonts
+
         noto_fonts = load_noto_fonts(lang_out)
         envs["noto_fonts"] = noto_fonts
     else:
