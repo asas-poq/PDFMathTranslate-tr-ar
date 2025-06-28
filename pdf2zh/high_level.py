@@ -77,8 +77,7 @@ def translate_patch(
     lang_in: str = "",
     lang_out: str = "",
     service: str = "",
-    noto_name: str = "",
-    noto: Font = None,
+    noto_fonts: Dict[str, Font] = None,  # Изменено на словарь шрифтов
     callback: object = None,
     cancellation_event: asyncio.Event = None,
     model: OnnxModel = None,
@@ -98,12 +97,12 @@ def translate_patch(
         lang_in,
         lang_out,
         service,
-        noto_name,
-        noto,
+        noto_fonts,  # Передаем словарь шрифтов
         envs,
         prompt,
         ignore_cache,
     )
+    
 
     assert device is not None
     obj_patch = {}
@@ -184,8 +183,19 @@ def translate_stream(
     ignore_cache: bool = False,
     **kwarg: Any,
 ):
-    font_list = [("tiro", None)]
-
+    # Загрузка всех необходимых шрифтов
+    font_paths = download_remote_fonts(lang_out.lower())
+    
+    # Создаем объекты Font для каждого стиля
+    noto_fonts = {}
+    font_list = [("tiro", None)]  # Базовый латинский шрифт
+    
+    for style, path in font_paths.items():
+        font_name = f"noto_{style}"
+        font_obj = Font(font_name, path)
+        noto_fonts[style] = font_obj
+        font_list.append((font_name, path))
+    
     font_path = download_remote_fonts(lang_out.lower())
     noto_name = NOTO_NAME
     noto = Font(noto_name, font_path)
@@ -229,8 +239,26 @@ def translate_stream(
     fp = io.BytesIO()
 
     doc_zh.save(fp)
-    obj_patch: dict = translate_patch(fp, **locals())
 
+    obj_patch: dict = translate_patch(
+        fp,
+        pages=pages,
+        vfont=vfont,
+        vchar=vchar,
+        thread=thread,
+        doc_zh=doc_zh,
+        lang_in=lang_in,
+        lang_out=lang_out,
+        service=service,
+        noto_fonts=noto_fonts,  # Передаем словарь шрифтов
+        callback=callback,
+        cancellation_event=cancellation_event,
+        model=model,
+        envs=envs,
+        prompt=prompt,
+        ignore_cache=ignore_cache,
+        **kwarg
+    )
     for obj_id, ops_new in obj_patch.items():
         # ops_old=doc_en.xref_stream(obj_id)
         # print(obj_id)
@@ -330,10 +358,21 @@ def translate(
             print(f"  {file}", file=sys.stderr)
         raise PDFValueError("Some files do not exist.")
 
+    # === [Шаг 1: Загрузка шрифтов] ===
+    if envs is None:
+        envs = {}
+
+    if "noto_fonts" not in envs:
+        from myfonts import load_noto_fonts  # <-- замените на путь к своей функции
+        noto_fonts = load_noto_fonts(lang_out)
+        envs["noto_fonts"] = noto_fonts
+    else:
+        noto_fonts = envs["noto_fonts"]
+
     result_files = []
 
     for file in files:
-        if type(file) is str and (
+        if isinstance(file, str) and (
             file.startswith("http://") or file.startswith("https://")
         ):
             print("Online files detected, downloading...")
@@ -354,8 +393,6 @@ def translate(
                 )
         filename = os.path.splitext(os.path.basename(file))[0]
 
-        # If the commandline has specified converting to PDF/A format
-        # --compatible / -cp
         if compatible:
             with tempfile.NamedTemporaryFile(
                 suffix="-pdfa.pdf", delete=False
@@ -380,46 +417,93 @@ def translate(
         except Exception as e:
             logger.warning(f"Failed to clean temp file {file_path}", exc_info=True)
 
+        # === [Шаг 2: Передаём noto_fonts в translate_stream] ===
         s_mono, s_dual = translate_stream(
-            s_raw,
-            **locals(),
+            s_raw=s_raw,
+            lang_in=lang_in,
+            lang_out=lang_out,
+            service=service,
+            thread=thread,
+            vfont=vfont,
+            vchar=vchar,
+            callback=callback,
+            pages=pages,
+            model=model,
+            prompt=prompt,
+            envs=envs,
+            cancellation_event=cancellation_event,
+            skip_subset_fonts=skip_subset_fonts,
+            ignore_cache=ignore_cache,
+            output=output,
+            noto_fonts=noto_fonts,
+            **kwarg,
         )
+
         file_mono = Path(output) / f"{filename}-mono.pdf"
         file_dual = Path(output) / f"{filename}-dual.pdf"
-        doc_mono = open(file_mono, "wb")
-        doc_dual = open(file_dual, "wb")
-        doc_mono.write(s_mono)
-        doc_dual.write(s_dual)
-        doc_mono.close()
-        doc_dual.close()
+        with open(file_mono, "wb") as doc_mono, open(file_dual, "wb") as doc_dual:
+            doc_mono.write(s_mono)
+            doc_dual.write(s_dual)
+
         result_files.append((str(file_mono), str(file_dual)))
 
     return result_files
 
-
-def download_remote_fonts(lang: str):
+def download_remote_fonts(lang: str) -> Dict[str, str]:
     lang = lang.lower()
-    LANG_NAME_MAP = {
-        **{la: "GoNotoKurrent-Regular.ttf" for la in noto_list},
-        **{
-            la: f"SourceHanSerif{region}-Regular.ttf"
-            for region, langs in {
-                "CN": ["zh-cn", "zh-hans", "zh"],
-                "TW": ["zh-tw", "zh-hant"],
-                "JP": ["ja"],
-                "KR": ["ko"],
-            }.items()
-            for la in langs
-        },
+    
+    # Базовые стили для латинских/турецких шрифтов
+    LATIN_FONTS = {
+        "regular": "NotoSans-Regular.ttf",
+        "bold": "NotoSans-Bold.ttf",
+        "italic": "NotoSans-Italic.ttf",
+        "bolditalic": "NotoSans-BoldItalic.ttf"
     }
-    font_name = LANG_NAME_MAP.get(lang, "GoNotoKurrent-Regular.ttf")
+    
+    # Арабские шрифты с поддержкой RTL
+    ARABIC_FONTS = {
+        "regular": "NotoNaskhArabic-Regular.ttf",
+        "bold": "NotoNaskhArabic-Bold.ttf",
+        "medium": "NotoNaskhArabic-Medium.ttf",
+        "semibold": "NotoNaskhArabic-SemiBold.ttf"
+    }
+    
+    # Маппинг языков на шрифтовые наборы
+    FONT_MAP = {
+        "ar": ARABIC_FONTS,  # Арабский
+        "ur": ARABIC_FONTS,  # Урду
+        **{tr_lang: LATIN_FONTS for tr_lang in ["tr", "az"]}  # Турецкий/Азербайджанский
+    }
+    
+    font_set = FONT_MAP.get(lang, LATIN_FONTS)  # По умолчанию латинские
+    font_paths = {}
+    
+    for style, font_file in font_set.items():
+        # Определение папки в репозитории
+        if "NotoSans" in font_file:
+            font_folder = "NotoSans"
+        elif "NotoNaskhArabic" in font_file:
+            font_folder = "NotoNaskhArabic"
+        else:
+            font_folder = "NotoSans"
+        
+        url = f"https://github.com/notofonts/noto-fonts/raw/main/hinted/ttf/{font_folder}/{font_file}"
+        
+        # Скачивание с резервным механизмом
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                font_path = Path(tempfile.gettempdir()) / font_file
+                with open(font_path, "wb") as f:
+                    font_path.write_bytes(response.content)
+                font_paths[style] = str(font_path)
+            else:
+                raise Exception(f"HTTP {response.status_code}")
+        except Exception as e:
+            logger.error(f"Failed download: {font_file}, {str(e)}")
+            # Резервный путь
+            fallback_path = get_font_and_metadata(font_file)[0]
+            font_paths[style] = str(fallback_path)
+    
+    return font_paths
 
-    # docker
-    font_path = ConfigManager.get("NOTO_FONT_PATH", Path("/app", font_name).as_posix())
-    if not Path(font_path).exists():
-        font_path, _ = get_font_and_metadata(font_name)
-        font_path = font_path.as_posix()
-
-    logger.info(f"use font: {font_path}")
-
-    return font_path
