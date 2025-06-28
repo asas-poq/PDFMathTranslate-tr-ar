@@ -126,7 +126,7 @@ class Paragraph:
         self.brk: bool = brk  # 换行标记
 
 
-# fmt: off
+
 class TranslateConverter(PDFConverterEx):
     def __init__(
         self,
@@ -138,8 +138,7 @@ class TranslateConverter(PDFConverterEx):
         lang_in: str = "",
         lang_out: str = "",
         service: str = "",
-        noto_name: str = "",
-        noto: Font = None,
+        noto_fonts: Dict[str, Font] = None,  # Изменено на словарь шрифтов
         envs: Dict = None,
         prompt: Template = None,
         ignore_cache: bool = False,
@@ -149,9 +148,9 @@ class TranslateConverter(PDFConverterEx):
         self.vchar = vchar
         self.thread = thread
         self.layout = layout
-        self.noto_name = noto_name
-        self.noto = noto
+        self.noto_fonts = noto_fonts or {}  # Словарь шрифтов вместо одного
         self.translator: BaseTranslator = None
+
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)
         service_name = param[0]
@@ -363,9 +362,12 @@ class TranslateConverter(PDFConverterEx):
 
         ############################################################
         # C. 新文档排版
-        def raw_string(fcur: str, cstk: str):  # 编码字符串
-            if fcur == self.noto_name:
-                return "".join(["%04x" % self.noto.has_glyph(ord(c)) for c in cstk])
+
+
+        def raw_string(font_obj: Font, cstk: str):  # 编码字符串
+            """Используем переданный объект шрифта для кодирования"""
+            return "".join(["%04x" % font_obj.has_glyph(ord(c)) for c in cstk])
+
             elif isinstance(self.fontmap[fcur], PDFCIDFont):  # 判断编码长度
                 return "".join(["%04x" % ord(c) for c in cstk])
             else:
@@ -418,21 +420,69 @@ class TranslateConverter(PDFConverterEx):
                         continue  # 翻译器可能会自动补个越界的公式标记
                     if var[vid][-1].get_text() and unicodedata.category(var[vid][-1].get_text()[0]) in ["Lm", "Mn", "Sk"]:  # 文字修饰符
                         mod = var[vid][-1].width
+
+                
                 else:  # 加载文字
                     ch = new[ptr]
                     fcur_ = None
-                    try:
-                        if fcur_ is None and self.fontmap["tiro"].to_unichr(ord(ch)) == ch:
-                            fcur_ = "tiro"  # 默认拉丁字体
-                    except Exception:
-                        pass
-                    if fcur_ is None:
-                        fcur_ = self.noto_name  # 默认非拉丁字体
-                    if fcur_ == self.noto_name: # FIXME: change to CONST
-                        adv = self.noto.char_lengths(ch, size)[0]
+                    
+                    # Определяем стиль шрифта на основе характеристик
+                    style = "regular"
+                    font_name = xt.fontname.lower() if xt else ""
+                    
+                    # Маппинг специфических шрифтов
+                    SPECIAL_FONT_MAPPING = {
+                        "aga-arabesque": "arabic",
+                        "arabictypesetting": "arabic",
+                        "kfgqpc": "arabic",
+                        "lateef": "arabic",
+                        "garamond": "italic",
+                        "bookantiqua": "regular",
+                        "timesnewroman": "regular"
+                    }
+                    
+                    # Определение стиля по имени шрифта
+                    for pattern, mapped_style in SPECIAL_FONT_MAPPING.items():
+                        if pattern in font_name:
+                            style = mapped_style
+                            break
+                            
+                    # Определение по характеристикам
+                    if "bold" in font_name and "italic" in font_name:
+                        style = "bolditalic"
+                    elif "bold" in font_name:
+                        style = "bold"
+                    elif "italic" in font_name:
+                        style = "italic"
+                    
+                    # Определение по языку символов
+                    if any(0x0600 <= ord(c) <= 0x06FF for c in text):  # Арабские символы
+                        if style not in self.noto_fonts:
+                            style = "arabic"
+                    
+                    # Выбор шрифта из доступных
+                    if style in self.noto_fonts:
+                        current_font = self.noto_fonts[style]
                     else:
-                        adv = self.fontmap[fcur_].char_width(ord(ch)) * size
+                        current_font = self.noto_fonts.get("regular")
+                    
+                    if current_font:
+                        fcur_ = current_font.name
+                        adv = current_font.char_lengths(ch, size)[0]
+                    else:
+                        # Резервный вариант
+                        try:
+                            if self.fontmap["tiro"].to_unichr(ord(ch)) == ch:
+                                fcur_ = "tiro"
+                                adv = self.fontmap["tiro"].char_width(ord(ch)) * size
+                        except:
+                            fcur_ = list(self.noto_fonts.values())[0].name if self.noto_fonts else "tiro"
+                            adv = size  # Примерное значение
+                    
                     ptr += 1
+                
+ 
+                
                 if (                                # 输出文字缓冲区
                     fcur_ != fcur                   # 1. 字体更新
                     or vy_regex                     # 2. 插入公式
@@ -498,15 +548,20 @@ class TranslateConverter(PDFConverterEx):
                     _x, _y = x, y
             # 处理结尾
             if cstk:
+                if current_font and cstk:
+                    rtxt = raw_string(current_font, cstk)
+                else:
+        # Резервное кодирование
+                    rtxt = "".join(["%04x" % ord(c) for c in cstk])
                 ops_vals.append({
                     "type": OpType.TEXT,
                     "font": fcur,
                     "size": size,
                     "x": tx,
                     "dy": 0,
-                    "rtxt": raw_string(fcur, cstk),
+                    "rtxt": rtxt,
                     "lidx": lidx
-                })
+               })
 
             line_height = default_line_height
 
