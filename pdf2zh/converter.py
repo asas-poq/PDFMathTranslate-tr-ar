@@ -366,12 +366,14 @@ class TranslateConverter(PDFConverterEx):
 
         def raw_string(font_obj: Font, cstk: str):  # 编码字符串
             """Используем переданный объект шрифта для кодирования"""
-            return "".join(["%04x" % font_obj.has_glyph(ord(c)) for c in cstk])
-
-            elif isinstance(self.fontmap[fcur], PDFCIDFont):  # 判断编码长度
+            try:
+                if isinstance(font_obj, PDFCIDFont):  # 判断编码长度 для CID шрифта
+                    return "".join(["%04x" % ord(c) for c in cstk])
+                else:  # Обычный TTF шрифт или встроенный
+                    return "".join(["%02x" % ord(c) for c in cstk])
+            except Exception:
+        # Резервное поведение, если font_obj нераспознан
                 return "".join(["%04x" % ord(c) for c in cstk])
-            else:
-                return "".join(["%02x" % ord(c) for c in cstk])
 
         # 根据目标语言获取默认行距
         LANG_LINEHEIGHT_MAP = {
