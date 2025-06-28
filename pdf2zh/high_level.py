@@ -363,7 +363,7 @@ def translate(
         envs = {}
 
     if "noto_fonts" not in envs:
-        from myfonts import load_noto_fonts  # <-- которого нет
+        from .myfonts import load_noto_fonts  # <-- которого нет
 
         noto_fonts = load_noto_fonts(lang_out)
         envs["noto_fonts"] = noto_fonts
